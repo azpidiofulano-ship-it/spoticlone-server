@@ -7,53 +7,42 @@ app = Flask(__name__)
 def is_valid_video_id(vid):
     return bool(re.match(r'^[a-zA-Z0-9_-]{11}$', vid))
 
+def try_extract(video_id, client):
+    ydl_opts = {
+        'format': 'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best',
+        'quiet': True,
+        'no_warnings': True,
+        'skip_download': True,
+        'extractor_args': {'youtube': {'player_client': [client]}},
+    }
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(f'https://www.youtube.com/watch?v={video_id}', download=False)
+        audio_url = None
+        for fmt in sorted(info.get('formats') or [], key=lambda f: f.get('abr') or 0, reverse=True):
+            if fmt.get('acodec') not in (None, 'none') and fmt.get('vcodec') in (None, 'none'):
+                url = fmt.get('url', '')
+                if url.startswith('http'):
+                    audio_url = url
+                    break
+        if not audio_url:
+            audio_url = info.get('url', '')
+        return audio_url, int(info.get('duration', 0)), info.get('title', ''), info.get('thumbnail', '')
+
 @app.route('/audio')
 def get_audio():
     video_id = request.args.get('id', '').strip()
     if not video_id or not is_valid_video_id(video_id):
         return jsonify({'error': 'ID inválido'}), 400
 
-    ydl_opts = {
-        'format': 'bestaudio[ext=m4a]/bestaudio/best',
-        'quiet': True,
-        'no_warnings': True,
-        'extract_flat': False,
-        'skip_download': True,
-    }
+    for client in ['android', 'android_vr', 'web', 'ios']:
+        try:
+            audio_url, duration, title, thumbnail = try_extract(video_id, client)
+            if audio_url and audio_url.startswith('http'):
+                return jsonify({'url': audio_url, 'duration': duration, 'title': title, 'thumbnail': thumbnail})
+        except Exception as e:
+            continue
 
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(
-                f'https://www.youtube.com/watch?v={video_id}',
-                download=False
-            )
-            # Buscar el mejor formato de solo audio
-            audio_url = None
-            duration  = int(info.get('duration', 0))
-            title     = info.get('title', '')
-            thumbnail = info.get('thumbnail', '')
-
-            for fmt in (info.get('formats') or []):
-                if fmt.get('acodec') != 'none' and fmt.get('vcodec') == 'none':
-                    audio_url = fmt.get('url')
-                    break
-
-            # Si no hay formato solo-audio, usar el mejor disponible
-            if not audio_url:
-                audio_url = info.get('url') or info.get('webpage_url')
-
-            if not audio_url:
-                return jsonify({'error': 'No se pudo obtener URL de audio'}), 404
-
-            return jsonify({
-                'url':       audio_url,
-                'duration':  duration,
-                'title':     title,
-                'thumbnail': thumbnail
-            })
-
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+    return jsonify({'error': 'No se pudo obtener audio para este vídeo'}), 500
 
 @app.route('/search')
 def search():
@@ -65,20 +54,21 @@ def search():
         'quiet': True,
         'no_warnings': True,
         'extract_flat': True,
-        'default_search': 'ytsearch10',
         'skip_download': True,
     }
-
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(f'ytsearch10:{query}', download=False)
             results = []
             for entry in (info.get('entries') or []):
+                vid_id = entry.get('id', '')
+                if not vid_id:
+                    continue
                 results.append({
-                    'id':        entry.get('id', ''),
+                    'id':        vid_id,
                     'title':     entry.get('title', ''),
                     'duration':  int(entry.get('duration') or 0),
-                    'thumbnail': entry.get('thumbnail', ''),
+                    'thumbnail': entry.get('thumbnail', f'https://i.ytimg.com/vi/{vid_id}/mqdefault.jpg'),
                     'channel':   entry.get('channel', entry.get('uploader', '')),
                 })
             return jsonify({'results': results})
@@ -90,4 +80,6 @@ def health():
     return jsonify({'status': 'ok'})
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=10000)
+    import os
+    port = int(os.environ.get('PORT', 10000))
+    app.run(host='0.0.0.0', port=port)
